@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-03
+
 This is the first stable release of the 1.4 line, after the alphas below. Compared with 1.3.1, the entries marked **Breaking** can break the code that uses PyGazpar. The alpha sections give the detail of each step.
 
 ### Breaking
@@ -481,7 +483,8 @@ It occurs with the page containing 'Jour' button which is very long to load (I i
 ### Removed
 - Remove Client.data property to get the updated data. Replaced with Client.__data private property.
 
-[Unreleased]: https://github.com/ssenart/pygazpar/compare/1.4.0a7...HEAD
+[Unreleased]: https://github.com/ssenart/pygazpar/compare/1.4.0...HEAD
+[1.4.0]: https://github.com/ssenart/pygazpar/compare/1.4.0a7...1.4.0
 [1.4.0a7]: https://github.com/ssenart/pygazpar/compare/1.4.0a6...1.4.0a7
 [1.4.0a6]: https://github.com/ssenart/pygazpar/compare/1.4.0a5...1.4.0a6
 [1.4.0a5]: https://github.com/ssenart/pygazpar/compare/1.4.0a4...1.4.0a5
