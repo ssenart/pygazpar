@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The GrDF identify step answer, logged at DEBUG to diagnose [#118](https://github.com/ssenart/gazpar2haws/issues/118), is no longer logged: it contained the account e-mail in clear (`user.identifier`), which reached the logs of every DEBUG run, including the Home Assistant add-on's. The log line is commented out in `api_client.py`, with a note on how to re-enable it for an investigation. The redaction helper is still used for the password step's error body.
+
 ## [1.4.0a7] - 2026-10-20
 
 ### Changed

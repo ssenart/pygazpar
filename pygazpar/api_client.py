@@ -211,7 +211,13 @@ class APIClient:
             timeout=REQUEST_TIMEOUT,
         )
 
-        Logger.debug("GrDF identify response body: %s", login_diagnostic_body(mail_response))
+        # Diagnostic only, for investigating https://github.com/ssenart/gazpar2haws/issues/118.
+        # Logs which IDX step GrDF/Okta answered with (a password challenge, or an extra authenticator
+        # to pick), which tells a wrong password apart from an extra authentication step.
+        # Disabled by default. To investigate a login failure, uncomment the line below, reproduce the
+        # failure at DEBUG, then comment it out again: the body contains the account e-mail in clear
+        # (user.identifier), so do not leave it enabled or share these logs unredacted.
+        # Logger.debug("GrDF identify response body: %s", login_diagnostic_body(mail_response))
 
         if mail_response.status_code != 200:
             raise LoginError(
