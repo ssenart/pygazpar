@@ -6,9 +6,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This is the first stable release of the 1.4 line, after the alphas below. Compared with 1.3.1, the entries marked **Breaking** can break the code that uses PyGazpar. The alpha sections give the detail of each step.
+
+### Breaking
+
+- **Breaking:** `Client(dataSource=...)`, `ExcelFileDataSource(excelFile=...)` and `JsonFileDataSource(consumptionJsonFile=..., temperatureJsonFile=...)` are now snake_case: `data_source`, `excel_file`, `consumption_json_file` and `temperature_json_file`. `IDataSource.readings()` and `load()` take `pce_identifier`, `start_date` and `end_date` instead of `pceIdentifier`, `startDate` and `endDate`. `ExcelWebDataSource(tmpDirectory=...)` still works, deprecated.
+- **Breaking:** `Client.loadSince()` and `Client.loadDateRange()` are removed. Use `load_since()` and `load_date_range()`.
+- **Breaking:** the `FrequencyConverter` methods are `compute_hourly()`, `compute_daily()`, `compute_weekly()`, `compute_monthly()` and `compute_yearly()`. The GrDF frequency enum of `pygazpar.api_client` is `GrdfFrequency`, so it no longer shares its name with `pygazpar.Frequency`.
+- **Breaking:** the attributes of `GrdfRecord`, `GrdfPce` and `GrdfPceConsumption` are snake_case (`index_debut`, `id_object`, ...).
+- **Breaking:** `APIClient` methods return models, not dicts and lists, and a malformed GrDF response raises a pydantic `ValidationError` instead of `TypeError`.
+- **Breaking:** published readings are one row per day, with the type `Calculé`, instead of one row per period. Row counts for published data change.
+- **Breaking:** every row carries the full set of keys, with `null` for the values a source does not give. Rows gain `frequency`, `start_date` and `end_date`. Weekly rows follow the calendar, so values change around the new year.
+- **Breaking:** when GrDF has no data for the period, `JsonWebDataSource` returns an empty list per frequency, not an empty dict.
+- **Breaking:** `UnknownPceError` is a `LookupError`, not a `ServerError`. `ServerError` is no longer a `SystemError`.
+- **Breaking:** a custom `IDataSource` implements `readings()`, which returns models. `load()` is now the dict form, provided by the base class.
+- **Breaking:** the private methods and attributes start with a single underscore. `_loadFromSession` is `_load_from_session`.
+- **Breaking (command line):** the `pygazpar` command is a set of subcommands: `pygazpar readings -f daily -d 30` replaces `pygazpar -u ... -p ... -c ... -f daily -d 30`. `--lastNDays` is `--last-days`, `-v` counts log verbosity and `--version` prints the version, and `--datasource raw-consumption` and `raw-temperature` became `pygazpar api consumption --raw` and `pygazpar api meteo --raw`. The output is a table in a terminal and JSON when piped, and `--format json` uses snake_case keys. The command line needs the `cli` extra: `pip install "pygazpar[cli]"`.
+- **Breaking:** the `pandas`, `numpy`, `python-dateutil`, `pytz`, `six` and `tzdata` dependencies are removed. `pydantic` is a new runtime dependency.
+
+### Added
+
+- `Client` is a context manager: `with Client(data_source) as client:` logs in, and logs out at the end of the block.
+- Errors have a common base, `PyGazparError`, in `pygazpar.errors`. `LoginError` tells a refused login apart, and `RateLimitError` (a `ServerError` with status 429) a rate limit. `NotLoggedInError` is raised when a call comes before `login()`. They are exported by `pygazpar`.
+- `pygazpar` exports `PeriodReading`, `DailyReading`, `IDataSource` and `RawWebDataSource`. Data models are in `pygazpar.model`, and GrDF records and responses in `pygazpar.grdf`, validated as they are read.
+- Support for the published consumption, read with `consumption_type=PUBLISHED`.
+- `RawConsumptionWebDataSource` and `RawTemperatureWebDataSource` return the GrDF responses as received.
+- Gaps between published periods, and informative days without data, are rebuilt from the meter indexes, with the type `Calculé`. A warning is logged when published periods do not chain.
+- `pygazpar readings` accepts several `-f` frequencies (or `all`), `--start`/`--end` dates, and `--format table|json|ndjson|csv` with `-o`.
+- `pygazpar pce`, `pygazpar auth check`, `pygazpar version`, `pygazpar api pce|consumption|meteo|excel` and `pygazpar file excel|json` commands.
+- The command line reads `GRDF_USERNAME`, `GRDF_PASSWORD` and `PCE_IDENTIFIER` from the environment or a `.env` file, and `--password-stdin`. The PCE is chosen automatically when the account has only one.
+- Exit codes by cause (usage 2, login 3, unknown PCE 4, rate limit 5), a one line error instead of a traceback (`-vv` for the traceback), `NO_COLOR`, `--no-color`, and shell completion.
+- `ExcelWebDataSource` takes `tmp_directory`.
+
 ### Changed
 
-- The GrDF identify step answer, logged at DEBUG to diagnose [#118](https://github.com/ssenart/gazpar2haws/issues/118), is no longer logged: it contained the account e-mail in clear (`user.identifier`), which reached the logs of every DEBUG run, including the Home Assistant add-on's. The log line is commented out in `api_client.py`, with a note on how to re-enable it for an investigation. The redaction helper is still used for the password step's error body.
+- The `Frequency` enum is a string too, so readings keyed by `"daily"` still work.
+- Published readings are split into one row per day, with the volume spread evenly and the energy in proportion, so the published totals stay exact.
+- Development tooling: uv replaces Poetry, and ruff and mypy replace flake8, isort, black and pylint. Python 3.14 is tested and listed as supported.
+- The release process: the create-release workflow checks the version, the branch and the changelog, then finalizes the changelog, tags and publishes.
+- The README is reorganized, and the period computation reference moved to `docs/published-readings.md`.
+
+### Deprecated
+
+- `ExcelWebDataSource(tmpDirectory=...)`: use `tmp_directory`. It still works, with a `DeprecationWarning`, and will be removed in 2.0.
+
+### Removed
+
+- The `Client.loadSince()` and `Client.loadDateRange()` methods, deprecated since 1.3.x.
+- The `pandas` dependency and the others listed under Breaking.
+- GitVersion and its configuration.
+
+### Fixed
+
+- GrDF's HTTP 429 answers are reported as a rate limit. The call is retried after the `Retry-After` delay, then raises `RateLimitError`. The retry delay grows at each attempt.
+- Requests have a timeout (10 s to connect, 60 s to read). Network errors are retried. An expired session (HTTP 401, or a redirect to the login page) is detected, and the client logs in again once.
+- A password with a double quote, a backslash, a tab or a non-ASCII character no longer breaks the login.
+- A refused login reports only the identity provider's messages. The exception and the logs no longer carry the login state token.
+- Published readings whose `journeeGaziere` field is empty use the last day of their period.
+- Empty buckets give `null` instead of `NaN`, which is not valid JSON.
+- Weekly rows follow the calendar: the week of 30 December 2019 to 5 January 2020 is its own week.
+- The command line accepts `-f daily` as well as `-f DAILY`.
+- `ExcelWebDataSource` downloads each file into its own private directory, removed after parsing. It no longer deletes other files, and the name sent by GrDF is never used as a path.
+- `JsonWebDataSource` logs a warning when the temperatures are not available.
+
+### Security
+
+- The state handle is redacted recursively in the login diagnostics, including the form fields that repeat it, and any field Okta marks `"secret": true` is cleared.
+- The identify step answer, logged at DEBUG to diagnose [#118](https://github.com/ssenart/gazpar2haws/issues/118), is no longer logged: it contained the account e-mail in clear (`user.identifier`), which reached the logs of every DEBUG run, including the Home Assistant add-on's. The log line is commented out in `api_client.py`, with a note on how to re-enable it for an investigation. The redaction helper is still used for the password step's error body.
+- Locked `urllib3` to 2.8.0, `requests` to 2.34.2, `idna` to 3.20 and `python-dotenv` to 1.2.4 to fix open Dependabot alerts.
 
 ## [1.4.0a7] - 2026-10-20
 
