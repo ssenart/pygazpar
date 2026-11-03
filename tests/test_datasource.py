@@ -10,11 +10,12 @@ from pygazpar.datasource import (
     JsonWebDataSource,
     TestDataSource,
 )
-from pygazpar.enum import Frequency
+from pygazpar.model import Frequency
+
+PCE_IDENTIFIER = "12345678901234"
 
 
 class TestAllDataSource:
-
     # ------------------------------------------------------
     @classmethod
     def setup_class(cls):
@@ -42,10 +43,10 @@ class TestAllDataSource:
 
         load_dotenv()
 
-        self.__username = os.environ["GRDF_USERNAME"]  # pylint: disable=attribute-defined-outside-init
-        self.__password = os.environ["GRDF_PASSWORD"]  # pylint: disable=attribute-defined-outside-init
-        self.__pceIdentifier = os.environ["PCE_IDENTIFIER"]  # pylint: disable=attribute-defined-outside-init
-        self.__tmp_directory = tmpdir  # pylint: disable=attribute-defined-outside-init
+        self._username = os.environ["GRDF_USERNAME"]
+        self._password = os.environ["GRDF_PASSWORD"]
+        self._pceIdentifier = os.environ["PCE_IDENTIFIER"]
+        self._tmp_directory = tmpdir
 
     # ------------------------------------------------------
     def teardown_method(self):
@@ -56,12 +57,12 @@ class TestAllDataSource:
     # ------------------------------------------------------
     def test_sample(self):
 
-        dataSource = TestDataSource()
+        data_source = TestDataSource()
 
-        endDate = date.today()
-        startDate = endDate + timedelta(days=-365)
+        end_date = date.today()
+        start_date = end_date + timedelta(days=-365)
 
-        data = dataSource.load(self.__pceIdentifier, startDate, endDate)
+        data = data_source.load(self._pceIdentifier, start_date, end_date)
 
         assert len(data[Frequency.DAILY.value]) == 711
 
@@ -74,23 +75,24 @@ class TestAllDataSource:
     # ------------------------------------------------------
     def test_jsonfile_sample(self):
 
-        dataSource = JsonFileDataSource(
+        data_source = JsonFileDataSource(
             "tests/resources/donnees_informatives.json", "tests/resources/temperatures.json"
         )
 
-        endDate = date.today()
-        startDate = endDate + timedelta(days=-365)
+        end_date = date.today()
+        start_date = end_date + timedelta(days=-365)
 
-        data = dataSource.load(
-            self.__pceIdentifier,
-            startDate,
-            endDate,
+        data = data_source.load(
+            PCE_IDENTIFIER,
+            start_date,
+            end_date,
             [Frequency.DAILY, Frequency.WEEKLY, Frequency.MONTHLY, Frequency.YEARLY],
         )
 
         assert len(data[Frequency.DAILY.value]) == 1096
 
-        assert len(data[Frequency.WEEKLY.value]) == 155
+        # 156 weeks: the week of 30 December 2019 to 5 January 2020 is its own week.
+        assert len(data[Frequency.WEEKLY.value]) == 156
 
         assert len(data[Frequency.MONTHLY.value]) == 36
 
@@ -99,63 +101,63 @@ class TestAllDataSource:
     # ------------------------------------------------------
     def test_daily_excelfile_sample(self):
 
-        dataSource = ExcelFileDataSource("tests/resources/Donnees_informatives_PCE_DAILY.xlsx")
+        data_source = ExcelFileDataSource("tests/resources/Donnees_informatives_PCE_DAILY.xlsx")
 
-        endDate = date.today()
-        startDate = endDate + timedelta(days=-365)
+        end_date = date.today()
+        start_date = end_date + timedelta(days=-365)
 
-        data = dataSource.load(self.__pceIdentifier, startDate, endDate, [Frequency.DAILY])
+        data = data_source.load(self._pceIdentifier, start_date, end_date, [Frequency.DAILY])
 
         assert len(data[Frequency.DAILY.value]) == 363
 
     # ------------------------------------------------------
     def test_weekly_excelfile_sample(self):
 
-        dataSource = ExcelFileDataSource("tests/resources/Donnees_informatives_PCE_WEEKLY.xlsx")
+        data_source = ExcelFileDataSource("tests/resources/Donnees_informatives_PCE_WEEKLY.xlsx")
 
-        endDate = date.today()
-        startDate = endDate + timedelta(days=-365)
+        end_date = date.today()
+        start_date = end_date + timedelta(days=-365)
 
-        data = dataSource.load(self.__pceIdentifier, startDate, endDate, [Frequency.WEEKLY])
+        data = data_source.load(self._pceIdentifier, start_date, end_date, [Frequency.WEEKLY])
 
         assert len(data[Frequency.WEEKLY.value]) == 53
 
     # ------------------------------------------------------
     def test_monthly_excelfile_sample(self):
 
-        dataSource = ExcelFileDataSource("tests/resources/Donnees_informatives_PCE_MONTHLY.xlsx")
+        data_source = ExcelFileDataSource("tests/resources/Donnees_informatives_PCE_MONTHLY.xlsx")
 
-        endDate = date.today()
-        startDate = endDate + timedelta(days=-365)
+        end_date = date.today()
+        start_date = end_date + timedelta(days=-365)
 
-        data = dataSource.load(self.__pceIdentifier, startDate, endDate, [Frequency.MONTHLY])
+        data = data_source.load(self._pceIdentifier, start_date, end_date, [Frequency.MONTHLY])
 
         assert len(data[Frequency.MONTHLY.value]) == 13
 
     # ------------------------------------------------------
     def test_yearly_excelfile_sample(self):
 
-        dataSource = ExcelFileDataSource("tests/resources/Donnees_informatives_PCE_DAILY.xlsx")
+        data_source = ExcelFileDataSource("tests/resources/Donnees_informatives_PCE_DAILY.xlsx")
 
-        endDate = date.today()
-        startDate = endDate + timedelta(days=-365)
+        end_date = date.today()
+        start_date = end_date + timedelta(days=-365)
 
-        data = dataSource.load(self.__pceIdentifier, startDate, endDate, [Frequency.YEARLY])
+        data = data_source.load(self._pceIdentifier, start_date, end_date, [Frequency.YEARLY])
 
         assert len(data[Frequency.YEARLY.value]) == 1
 
     # ------------------------------------------------------
     def test_jsonweb(self):
 
-        dataSource = JsonWebDataSource(self.__username, self.__password)
+        data_source = JsonWebDataSource(self._username, self._password)
 
-        endDate = date.today()
-        startDate = endDate + timedelta(days=-365)
+        end_date = date.today()
+        start_date = end_date + timedelta(days=-365)
 
-        data = dataSource.load(
-            self.__pceIdentifier,
-            startDate,
-            endDate,
+        data = data_source.load(
+            self._pceIdentifier,
+            start_date,
+            end_date,
             [Frequency.DAILY, Frequency.WEEKLY, Frequency.MONTHLY, Frequency.YEARLY],
         )
 
@@ -170,15 +172,15 @@ class TestAllDataSource:
     # ------------------------------------------------------
     def test_excelweb(self):
 
-        dataSource = ExcelWebDataSource(self.__username, self.__password, self.__tmp_directory)
+        data_source = ExcelWebDataSource(self._username, self._password, self._tmp_directory)
 
-        endDate = date.today()
-        startDate = endDate + timedelta(days=-365)
+        end_date = date.today()
+        start_date = end_date + timedelta(days=-365)
 
-        data = dataSource.load(
-            self.__pceIdentifier,
-            startDate,
-            endDate,
+        data = data_source.load(
+            self._pceIdentifier,
+            start_date,
+            end_date,
             [Frequency.DAILY, Frequency.WEEKLY, Frequency.MONTHLY, Frequency.YEARLY],
         )
 

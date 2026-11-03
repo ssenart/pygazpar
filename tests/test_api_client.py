@@ -3,11 +3,10 @@ from datetime import date
 
 import pytest
 
-from pygazpar.api_client import APIClient, ConsumptionType, Frequency, ServerError
+from pygazpar.api_client import APIClient, ConsumptionType, GrdfFrequency, ServerError
 
 
 class TestAPIClient:
-
     # ------------------------------------------------------
     @classmethod
     def setup_class(cls):
@@ -110,10 +109,11 @@ class TestAPIClient:
         end_date = date(2025, 1, 7)
 
         pce_consumption_informative = TestAPIClient._client.get_pce_consumption_excelsheet(
-            ConsumptionType.INFORMATIVE, start_date, end_date, Frequency.DAILY, [TestAPIClient._pceIdentifier]
+            ConsumptionType.INFORMATIVE, start_date, end_date, GrdfFrequency.DAILY, [TestAPIClient._pceIdentifier]
         )
 
-        assert len(pce_consumption_informative) > 0
+        assert pce_consumption_informative.filename
+        assert len(pce_consumption_informative.content) > 0
 
     # ------------------------------------------------------
     def test_get_pce_meteo(self):

@@ -1,89 +1,21 @@
-import argparse
-import json
-import logging
-import os
 import sys
-import traceback
 
-import pygazpar
-
-Logger = logging.getLogger(__name__)
+CLI_EXTRA_HINT = 'The pygazpar command line needs the cli extra: pip install "pygazpar[cli]"'
 
 
-def main():
-    """Main function"""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--version", action="version", version=f"PyGazpar {pygazpar.__version__}")
-    parser.add_argument("-u", "--username", required=True, help="GRDF username (email)")
-    parser.add_argument("-p", "--password", required=True, help="GRDF password")
-    parser.add_argument("-c", "--pce", required=True, help="GRDF PCE identifier")
-    parser.add_argument("-t", "--tmpdir", required=False, default="/tmp", help="tmp directory (default is /tmp)")
-    parser.add_argument(
-        "-f",
-        "--frequency",
-        required=False,
-        type=lambda frequency: pygazpar.Frequency[frequency],
-        choices=list(pygazpar.Frequency),
-        default="DAILY",
-        help="Meter reading frequency (DAILY, WEEKLY, MONTHLY, YEARLY)",
-    )
-    parser.add_argument(
-        "-d",
-        "--lastNDays",
-        required=False,
-        type=int,
-        default=365,
-        help="Get only the last N days of records (default: 365 days)",
-    )
-    parser.add_argument("--datasource", required=False, default="json", help="Datasource: json | excel | test")
-
-    args = parser.parse_args()
-
-    print(f"PyGazpar version: {pygazpar.__version__}")
-    print(f"Running on Python version: {sys.version}")
-
-    # We create the tmp directory if not already exists.
-    if not os.path.exists(args.tmpdir):
-        os.mkdir(args.tmpdir)
-
-    # We remove the pygazpar log file.
-    pygazparLogFile = f"{args.tmpdir}/pygazpar.log"
-    if os.path.isfile(pygazparLogFile):
-        os.remove(pygazparLogFile)
-
-    # Setup logging.
-    logging.basicConfig(
-        filename=f"{pygazparLogFile}", level=logging.DEBUG, format="%(asctime)s %(levelname)s [%(name)s] %(message)s"
-    )
-
-    Logger.info(f"PyGazpar version: {pygazpar.__version__}")
-    Logger.info(f"Running on Python version: {sys.version}")
-    Logger.info(f"--tmpdir {args.tmpdir}")
-    Logger.info(f"--frequency {args.frequency}")
-    Logger.info(f"--lastNDays {args.lastNDays}")
-    Logger.info(f"--datasource {bool(args.datasource)}")
-
-    if args.datasource == "json":
-        client = pygazpar.Client(pygazpar.JsonWebDataSource(args.username, args.password))
-    elif args.datasource == "excel":
-        client = pygazpar.Client(pygazpar.ExcelWebDataSource(args.username, args.password, args.tmpdir))
-    elif args.datasource == "test":
-        client = pygazpar.Client(pygazpar.TestDataSource())
-    else:
-        raise ValueError("Invalid datasource: (json | excel | test) is expected")
+def main() -> None:
+    """Entry point of the pygazpar command. The CLI dependencies are an optional extra of the library."""
 
     try:
-        data = client.load_since(args.pce, int(args.lastNDays), [args.frequency])
-    except BaseException:  # pylint: disable=broad-except
-        print("An error occured while querying PyGazpar library : %s", traceback.format_exc())
-        return 1
+        from pygazpar.cli import run
+    except ModuleNotFoundError as error:
+        if (error.name or "").split(".")[0] not in ("typer", "rich", "click"):
+            raise
+        print(CLI_EXTRA_HINT, file=sys.stderr)
+        sys.exit(1)
 
-    Logger.info(f"Data loaded: {len(data)} records")
-    Logger.debug(f"Data: {data}")
-    print(json.dumps(data, indent=2))
-
-    return 0
+    run()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

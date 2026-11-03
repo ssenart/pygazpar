@@ -4,102 +4,344 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+This is the first stable release of the 1.4 line, after the alphas below. Compared with 1.3.1, the entries marked **Breaking** can break the code that uses PyGazpar. The alpha sections give the detail of each step.
+
+### Breaking
+
+- **Breaking:** `Client(dataSource=...)`, `ExcelFileDataSource(excelFile=...)` and `JsonFileDataSource(consumptionJsonFile=..., temperatureJsonFile=...)` are now snake_case: `data_source`, `excel_file`, `consumption_json_file` and `temperature_json_file`. `IDataSource.readings()` and `load()` take `pce_identifier`, `start_date` and `end_date` instead of `pceIdentifier`, `startDate` and `endDate`. `ExcelWebDataSource(tmpDirectory=...)` still works, deprecated.
+- **Breaking:** `Client.loadSince()` and `Client.loadDateRange()` are removed. Use `load_since()` and `load_date_range()`.
+- **Breaking:** the `FrequencyConverter` methods are `compute_hourly()`, `compute_daily()`, `compute_weekly()`, `compute_monthly()` and `compute_yearly()`. The GrDF frequency enum of `pygazpar.api_client` is `GrdfFrequency`, so it no longer shares its name with `pygazpar.Frequency`.
+- **Breaking:** the attributes of `GrdfRecord`, `GrdfPce` and `GrdfPceConsumption` are snake_case (`index_debut`, `id_object`, ...).
+- **Breaking:** `APIClient` methods return models, not dicts and lists, and a malformed GrDF response raises a pydantic `ValidationError` instead of `TypeError`.
+- **Breaking:** published readings are one row per day, with the type `Calculé`, instead of one row per period. Row counts for published data change.
+- **Breaking:** every row carries the full set of keys, with `null` for the values a source does not give. Rows gain `frequency`, `start_date` and `end_date`. Weekly rows follow the calendar, so values change around the new year.
+- **Breaking:** when GrDF has no data for the period, `JsonWebDataSource` returns an empty list per frequency, not an empty dict.
+- **Breaking:** `UnknownPceError` is a `LookupError`, not a `ServerError`. `ServerError` is no longer a `SystemError`.
+- **Breaking:** a custom `IDataSource` implements `readings()`, which returns models. `load()` is now the dict form, provided by the base class.
+- **Breaking:** the private methods and attributes start with a single underscore. `_loadFromSession` is `_load_from_session`.
+- **Breaking (command line):** the `pygazpar` command is a set of subcommands: `pygazpar readings -f daily -d 30` replaces `pygazpar -u ... -p ... -c ... -f daily -d 30`. `--lastNDays` is `--last-days`, `-v` counts log verbosity and `--version` prints the version, and `--datasource raw-consumption` and `raw-temperature` became `pygazpar api consumption --raw` and `pygazpar api meteo --raw`. The output is a table in a terminal and JSON when piped, and `--format json` uses snake_case keys. The command line needs the `cli` extra: `pip install "pygazpar[cli]"`.
+- **Breaking:** the `pandas`, `numpy`, `python-dateutil`, `pytz`, `six` and `tzdata` dependencies are removed. `pydantic` is a new runtime dependency.
+
+### Added
+
+- `Client` is a context manager: `with Client(data_source) as client:` logs in, and logs out at the end of the block.
+- Errors have a common base, `PyGazparError`, in `pygazpar.errors`. `LoginError` tells a refused login apart, and `RateLimitError` (a `ServerError` with status 429) a rate limit. `NotLoggedInError` is raised when a call comes before `login()`. They are exported by `pygazpar`.
+- `pygazpar` exports `PeriodReading`, `DailyReading`, `IDataSource` and `RawWebDataSource`. Data models are in `pygazpar.model`, and GrDF records and responses in `pygazpar.grdf`, validated as they are read.
+- Support for the published consumption, read with `consumption_type=PUBLISHED`.
+- `RawConsumptionWebDataSource` and `RawTemperatureWebDataSource` return the GrDF responses as received.
+- Gaps between published periods, and informative days without data, are rebuilt from the meter indexes, with the type `Calculé`. A warning is logged when published periods do not chain.
+- `pygazpar readings` accepts several `-f` frequencies (or `all`), `--start`/`--end` dates, and `--format table|json|ndjson|csv` with `-o`.
+- `pygazpar pce`, `pygazpar auth check`, `pygazpar version`, `pygazpar api pce|consumption|meteo|excel` and `pygazpar file excel|json` commands.
+- The command line reads `GRDF_USERNAME`, `GRDF_PASSWORD` and `PCE_IDENTIFIER` from the environment or a `.env` file, and `--password-stdin`. The PCE is chosen automatically when the account has only one.
+- Exit codes by cause (usage 2, login 3, unknown PCE 4, rate limit 5), a one line error instead of a traceback (`-vv` for the traceback), `NO_COLOR`, `--no-color`, and shell completion.
+- `ExcelWebDataSource` takes `tmp_directory`.
+
+### Changed
+
+- The `Frequency` enum is a string too, so readings keyed by `"daily"` still work.
+- Published readings are split into one row per day, with the volume spread evenly and the energy in proportion, so the published totals stay exact.
+- Development tooling: uv replaces Poetry, and ruff and mypy replace flake8, isort, black and pylint. Python 3.14 is tested and listed as supported.
+- The release process: the create-release workflow checks the version, the branch and the changelog, then finalizes the changelog, tags and publishes.
+- The README is reorganized, and the period computation reference moved to `docs/published-readings.md`.
+
+### Deprecated
+
+- `ExcelWebDataSource(tmpDirectory=...)`: use `tmp_directory`. It still works, with a `DeprecationWarning`, and will be removed in 2.0.
+
+### Removed
+
+- The `Client.loadSince()` and `Client.loadDateRange()` methods, deprecated since 1.3.x.
+- The `pandas` dependency and the others listed under Breaking.
+- GitVersion and its configuration.
+
+### Fixed
+
+- GrDF's HTTP 429 answers are reported as a rate limit. The call is retried after the `Retry-After` delay, then raises `RateLimitError`. The retry delay grows at each attempt.
+- Requests have a timeout (10 s to connect, 60 s to read). Network errors are retried. An expired session (HTTP 401, or a redirect to the login page) is detected, and the client logs in again once.
+- A password with a double quote, a backslash, a tab or a non-ASCII character no longer breaks the login.
+- A refused login reports only the identity provider's messages. The exception and the logs no longer carry the login state token.
+- Published readings whose `journeeGaziere` field is empty use the last day of their period.
+- Empty buckets give `null` instead of `NaN`, which is not valid JSON.
+- Weekly rows follow the calendar: the week of 30 December 2019 to 5 January 2020 is its own week.
+- The command line accepts `-f daily` as well as `-f DAILY`.
+- `ExcelWebDataSource` downloads each file into its own private directory, removed after parsing. It no longer deletes other files, and the name sent by GrDF is never used as a path.
+- `JsonWebDataSource` logs a warning when the temperatures are not available.
+
+### Security
+
+- The state handle is redacted recursively in the login diagnostics, including the form fields that repeat it, and any field Okta marks `"secret": true` is cleared.
+- The identify step answer, logged at DEBUG to diagnose [#118](https://github.com/ssenart/gazpar2haws/issues/118), is no longer logged: it contained the account e-mail in clear (`user.identifier`), which reached the logs of every DEBUG run, including the Home Assistant add-on's. The log line is commented out in `api_client.py`, with a note on how to re-enable it for an investigation. The redaction helper is still used for the password step's error body.
+- Locked `urllib3` to 2.8.0, `requests` to 2.34.2, `idna` to 3.20 and `python-dotenv` to 1.2.4 to fix open Dependabot alerts.
+
+## [1.4.0a7] - 2026-10-20
+
+### Changed
+
+- **Breaking** (command line only, the library is unchanged): the `pygazpar` command is now a set of subcommands. The flat invocation `pygazpar -u ... -p ... -c ... -f daily -d 30` is replaced by `pygazpar readings -f daily -d 30`. `--lastNDays`/`-d` is now `--last-days`/`-d`, `-v` prints no version any more but counts log verbosity (`--version`/`-V` prints it), `--datasource raw-consumption` and `raw-temperature` became `pygazpar api consumption --raw` and `pygazpar api meteo --raw`, and `-t`/`--tmpdir` only serves the `excel` datasource. Output is a table in a terminal and JSON when piped, instead of always JSON; `--format json` gives a JSON object keyed by frequency, as before, but with snake_case keys (`converter_factor_kwh_m3` instead of `converter_factor_kwh/m3`, `type` unchanged). The version banner is no longer printed on stdout, and the DEBUG log is no longer written to `<tmpdir>/pygazpar.log` unless `--log-file` is given.
+- The command line needs the new `cli` extra: `pip install "pygazpar[cli]"`. The library dependencies are unchanged.
+- The README is reorganized: quick start, install split between users and development, one section per topic, a Security section, and badges. The period computation reference (steps, examples, invariants) moved to `docs/published-readings.md`, unchanged.
+- The samples follow the recommended usage: a `with` block so the session is logged out, typed readings, and handling of the GrDF errors. They are covered by `tests/test_samples.py`.
+- Credentials are no longer required for the `test` datasource and the `file` commands. A password can be given with `--password-stdin` or at the prompt, and the PCE is chosen automatically when the account has only one.
+
+### Added
+
+- `pygazpar readings` accepts several `-f` frequencies (or `all`), `--start`/`--end` dates besides `--last-days`, and `--format table|json|ndjson|csv` with `-o` to write a file.
+- `pygazpar pce`, `pygazpar auth check` and `pygazpar version` commands.
+- `pygazpar api pce|consumption|meteo|excel`, to see the GrDF API as it answers: every field of the PCE list and of the consumption records, with GrDF's own names and the fields PyGazpar does not know yet, the temperatures, the raw responses, and the Excel download.
+- `pygazpar file excel|json`, to read the Excel and JSON files offline.
+- Samples for the published consumption (`publishedSample.py`), the raw responses (`rawSample.py`) and the offline files (`offlineFilesSample.py`).
+- Exit codes by cause (usage 2, login 3, unknown PCE 4, rate limit 5), a one line error instead of a traceback (`-vv` for the traceback), `NO_COLOR` and `--no-color`, and shell completion.
+
+## [1.4.0a6] - 2026-10-11
+
+### Added
+
+- The identify step's answer, and a refused challenge's answer, are now logged at DEBUG with the state handle removed. The identify step always succeeds in the reported cases, but its answer is where GrDF/Okta states what it expects next; logging it even on success lets a working account's flow be compared to a failing one's. Temporary, to investigate [gazpar2haws#118](https://github.com/ssenart/gazpar2haws/issues/118).
+- `find_remediation()` reads a login step's answer the way Okta's IDX protocol actually works: a server-declared list of named next steps, each with its own href, rather than the fixed two-step sequence `login()` assumes. `login()` uses it, at the identify step, to log a warning if GrDF stops offering the password challenge as a `challenge-authenticator` remediation at the URL it hardcodes, or offers it at a different href - without changing what it actually does yet. Also temporary, same investigation.
+- A real GrDF identify response, anonymized, is now a test fixture (`tests/resources/okta_identify_response.json`), so the two items above are tested against the actual protocol GrDF speaks rather than a guess at its shape.
+
+### Security
+
+- The DEBUG diagnostic above only removed a top-level `stateHandle` key. GrDF's real answer has no such key: it repeats the state handle as a form field, once per remediation (`{"name": "stateHandle", "value": "<token>"}`), so none of it was actually redacted - confirmed against a real account before this fix shipped in a release. The redaction is now recursive and also clears any field Okta marks `"secret": true`.
+
+## [1.4.0a5] - 2026-10-10
+
+Entries marked **Breaking** can break the code that uses PyGazpar. The other entries are compatible: the code written for 1.4.0a4 keeps working.
+
+### Added
+
+- `Client` is a context manager: `with Client(data_source) as client:` logs in, and logs out at the end of the block.
+- The errors have a common base, `PyGazparError`, in the new `pygazpar.errors` module. Two new `ServerError` subclasses tell the causes apart: `LoginError` when GrDF refuses the login, and `RateLimitError` when it keeps refusing the calls sent back to back (HTTP 429). `NotLoggedInError` is raised when a call comes before `login()`, and is still a `ConnectionError`. All of them are exported by `pygazpar`, and the errors that existed are still importable from `pygazpar.api_client` and `pygazpar.datasource`.
+- `pygazpar` exports `PeriodReading`, `DailyReading`, `IDataSource` and `RawWebDataSource`.
+- `RawConsumptionWebDataSource` and `RawTemperatureWebDataSource` share the `RawWebDataSource` base, and gain `login()` and `logout()`.
+- `ExcelWebDataSource` takes its TMP directory as `tmp_directory`. The former `tmpDirectory` keyword still works (see Deprecated).
+
+### Changed
+
+Breaking:
+
+- **Breaking:** `UnknownPceError` is a `LookupError`, not a `ServerError`: `except ServerError` no longer catches it. `ServerError` is no longer a `SystemError`.
+- **Breaking:** the GrDF frequency enum of `pygazpar.api_client` is now `GrdfFrequency`, so it no longer shares its name with `pygazpar.Frequency`. `from pygazpar.api_client import Frequency` fails.
+- **Breaking:** the keyword parameters of `IDataSource.readings()` and `IDataSource.load()` are now `pce_identifier`, `start_date` and `end_date` (they were `pceIdentifier`, `startDate` and `endDate`). The same goes for the datasources that override them. Positional calls are not affected, and neither is `Client`.
+- **Breaking:** the keyword parameters of the constructors are snake_case: `Client(data_source=...)` (it was `dataSource`), `ExcelFileDataSource(excel_file=...)` (`excelFile`), and `JsonFileDataSource(consumption_json_file=..., temperature_json_file=...)` (`consumptionJsonFile`, `temperatureJsonFile`). Only `ExcelWebDataSource(tmpDirectory=...)` keeps its former name for now. Positional calls are not affected.
+- **Breaking:** `FrequencyConverter.computeHourly()`, `computeDaily()`, `computeWeekly()`, `computeMonthly()` and `computeYearly()` are now `compute_hourly()`, `compute_daily()`, `compute_weekly()`, `compute_monthly()` and `compute_yearly()`. `JsonParser.readings_from_json()` takes `json_str` and `temperatures_str`.
+- **Breaking:** the attributes of `GrdfRecord`, `GrdfPce` and `GrdfPceConsumption` are snake_case: `indexDebut` is now `index_debut`, `idObject` is `id_object`, and so on. They still read the GrDF camelCase keys, and validating a GrDF payload works as before.
+- **Breaking:** when GrDF has no data for the period, `JsonWebDataSource` returns an empty list for each requested frequency, instead of an empty dict. Code that tests `if not data` should test the lists.
+- **Breaking, internal:** the private methods and attributes start with a single underscore instead of two, and `_loadFromSession` is `_load_from_session`. Only the code that subclasses the datasources, or reaches into private members, is affected.
+
+Compatible:
+
+- `Frequency` is a string too. The readings loaded by `Client`, and by the datasources, are keyed by `Frequency` instead of plain strings. Reading them with `"daily"` or `Frequency.DAILY.value` still works, and so does the JSON form, because a `Frequency` key is equal to its value.
+- The command line is unchanged (`--lastNDays` is kept), and so is the dict form of the readings.
+- The identifiers of the library follow the snake_case convention, and ruff enforces it (`N` rules).
+- Development tooling: [uv](https://docs.astral.sh/uv/) replaces Poetry. The package is built with the `uv_build` backend, the development tools are a `dev` dependency group in `pyproject.toml`, and the locked versions are in `uv.lock` (`poetry.lock` is removed). The package, its dependencies and its command line are unchanged. To work on PyGazpar, run `uv sync` instead of `poetry install`. The CI and release workflows use uv.
+- `types-openpyxl` is a development dependency, so that mypy needs no `--install-types`.
+
+### Deprecated
+
+- `ExcelWebDataSource(tmpDirectory=...)`: use `tmp_directory`. The old keyword still works, with a `DeprecationWarning`, and will be removed in 2.0.
+
+### Removed
+
+- **Breaking:** `Client.loadSince()` and `Client.loadDateRange()`, deprecated since they were replaced by `Client.load_since()` and `Client.load_date_range()`. Their announced removal date, 2026-01-01, had passed.
+- The `pandas` dependency, which nothing used. `numpy`, `python-dateutil`, `pytz`, `six` and `tzdata` go with it. Code that imports one of them without declaring it must add it to its own dependencies.
+
+### Fixed
+
+- The command line accepts `-f daily` as well as `-f DAILY`, as its help says. It used to fail with a `KeyError` traceback on the lowercase names.
+- A refused login reports the messages of the identity provider only. The exception, and the logs, no longer carry the login state token that was in the answer.
+- The command line logs the number of readings loaded, not the number of frequencies.
+- The delay before a retry grows at each attempt (3, 6, 12, then 15 seconds at most) instead of staying at 3 seconds, for the 429 answers, the HTML answers and the network errors.
+- GrDF's HTTP 429 answers (too many requests sent back to back) are reported as a rate limit instead of "An unknown error occurred". The call is retried after the `Retry-After` delay when GrDF gives one, and raises a `RateLimitError` (a `ServerError` with status 429) when the retry limit is reached.
+- Requests to GrDF have a timeout (10 s to connect, 60 s to read) instead of waiting forever.
+- Network errors (connection errors and timeouts) are retried like the HTML answers GrDF sends instead of an error.
+- An expired session is detected (HTTP 401, or a redirection to the login page): the client logs in again once and repeats the call, instead of waiting for 10 retries.
+- `APIClient.get()` no longer crashes on an answer without `Content-Type`, nor with a retry count of 0.
+- `ExcelWebDataSource` downloads each file into its own private directory under the TMP directory, removed after the parsing. It no longer deletes the `Donnees_informatives_*.xlsx` files of others, and the file name sent by GrDF is never used as a path.
+- `JsonWebDataSource` logs a warning when the temperatures are not available.
+
+## [1.4.0a4] - 2026-10-05
+
+### Changed
+
+- Python 3.14 is tested in CI and listed as a supported version.
+- Development dependencies: pytest `^9.0.3` and pytest-asyncio `^1.4.0`.
+- Development tooling: ruff (lint and format) and mypy replace flake8, isort, black and pylint. Ruff and mypy are updated to their latest stable versions, and the CI lint and test steps are inlined in the workflow.
+
+### Security
+
+- Locked `urllib3` to 2.8.0, `requests` to 2.34.2, `idna` to 3.20 and `python-dotenv` to 1.2.4 to fix open Dependabot alerts.
+
+## [1.4.0a3] - 2026-10-04
+
+### Changed
+
+- Release process: the create-release workflow takes an explicit version, and checks it against the branch, the existing tags and the changelog before anything is changed.
+- Release process: the changelog is finalized automatically: `[Unreleased]` becomes the released version, a new empty `[Unreleased]` is added above it, and the compare links are updated.
+- Release process: GitHub releases are created as drafts by default, with the changelog section as their notes. A dry run option builds and validates a release without publishing it.
+- Release process: the version bump commit and the tag are pushed together, and only after the package is published.
+- Release process: final versions are released from `master`, alphas from `develop`, and betas and release candidates from `release/*`. Feature branches publish to TestPyPI.
+
+### Removed
+
+- GitVersion, its configuration and the version step in CI.
+
+## [1.4.0a2] - 2026-10-03
+
+### Added
+
+- CLI reads `GRDF_USERNAME`, `GRDF_PASSWORD` and `PCE_IDENTIFIER` from the environment or a `.env` file when the credentials are not given on the command line. `python-dotenv` is now a runtime dependency.
+- CLI `--consumption-type` option (`INFORMATIVE` or `PUBLISHED`) for the `json` and `raw-consumption` datasources.
+- CLI `raw-consumption` and `raw-temperature` datasources printing the GrDF API responses without post processing.
+- `RawConsumptionWebDataSource` and `RawTemperatureWebDataSource` in the library, returning the GrDF API responses as received.
+- Log a warning when published periods do not chain, and rebuild the gap from the meter indexes.
+- Gaps between published periods are rebuilt from the meter indexes: the volume is the index difference, and the energy uses the average coefficient of the neighbouring periods. The rows have the type `Calculé`.
+- Informative days without data are rebuilt from the meter indexes when the indexes on both sides are known.
+- Every reading shows its `frequency`, `start_date` and `end_date`.
+- Data model in `pygazpar.model` (`PeriodReading`, `DailyReading`, `Frequency`, `PropertyName`) and GrDF records and responses in `pygazpar.grdf`, validated as they are read.
+- `Client.load_readings_since` and `Client.load_readings_date_range` return the readings as models. `load_since` and `load_date_range` keep the dict form.
+
+### Changed
+
+- Published readings are split into one row per day instead of one row on the last day of their period. Volume is spread evenly across the days and energy follows it in proportion, keeping the published totals exact. Indexes are interpolated, and the rows have the type `Calculé`.
+- Informative records and published periods share one parsing path: each record is a period.
+- Weekly, monthly and yearly rows, and the Excel and test datasources, are built from the same models as the daily rows.
+- Excel rows are read into the models: a period without data gets empty values, and the dates come from the labels.
+- The API client validates each response as it arrives, and returns models: the PCE list, the consumption of each PCE, the temperatures and the Excel sheet. The raw sources use the `*_raw` methods, which return the response as received.
+- `--datasource` only accepts the listed datasources. Any other value is a usage error.
+- `pygazpar.enum` re-exports `Frequency` and `PropertyName`, which are now defined in `pygazpar.model`.
+
+### Fixed
+
+- Weekly rows follow the calendar: the week of 30 December 2019 to 5 January 2020 is its own week. Before, its first days were merged into the following week's label and totals.
+- Empty buckets give `null` values instead of `NaN`, which is not valid JSON.
+- A password with a double quote, a backslash, a tab or a non-ASCII character no longer breaks the login. The login requests are now built with `json.dumps`, so the password is sent as typed.
+
+### Breaking changes
+
+Compared with 1.3.1:
+
+- Rows carry the full set of keys, with `null` for the values a source does not give. The Excel and test datasource rows now have `temperature_degC`, `converter_factor_kwh/m3` and `type` keys, and the period rows have the index keys. Code that tests whether a key is present must change.
+- Output rows gain `frequency`, `start_date` and `end_date`. Code that checks the exact set of keys must accept them. The order of the keys changed.
+- Weekly values change around the new year, because of the fix above. The sample has 156 weekly rows instead of 155.
+- Published readings are returned one row per day, with the type `Calculé`, instead of one row per period. Row counts for published data change.
+- `APIClient` methods return models instead of dicts and lists: `get_pce_list` returns `GrdfPce` objects, `get_pce_consumption` returns `GrdfPceConsumption` objects keyed by PCE identifier, `get_pce_meteo` returns a dict keyed by date, and `get_pce_consumption_excelsheet` returns a `GrdfExcelSheet`.
+- A malformed API response raises a pydantic `ValidationError`, where it used to raise `TypeError`.
+- `FrequencyConverter` functions and `ExcelParser.parse` take and return models instead of dicts.
+- An invalid GrDF record is skipped with a warning.
+- `pydantic` is a new runtime dependency, and `typing-extensions` is bumped to 4.16.0.
+- A custom `IDataSource` implements `readings()`, which returns models, instead of `load()`. `load()` is now the dict form, provided by the base class.
+- The CLI refuses an unknown `--datasource` with a usage error (exit code 2), where it used to raise a `ValueError`.
+- Loading readings for a PCE that is not in the account raises `UnknownPceError`, a `ServerError`, where it used to return no data. The identifier is checked against the PCE list of the account, so a PCE of the account with no data still returns no readings. The raw sources and `APIClient` are unchanged.
+
+## [1.4.0a1] - 2026-07-27
+
+### Added
+
+- Support explicitly requesting published GRDF consumption readings.
+
+### Fixed
+
+- Parse published readings whose `journeeGaziere` field is empty by using the last day of their reporting period.
+
 ## [1.3.1] - 2025-07-22
 
 ### Fixed
 
-[#88](https://github.com/ssenart/PyGazpar/issues/88) : 500 - NGINX / OpenID Connect login failure.
+[#88](https://github.com/ssenart/pygazpar/issues/88) : 500 - NGINX / OpenID Connect login failure.
 
 ## [1.3.0] - 2025-02-15
 
 ### Added
 
-[#84](https://github.com/ssenart/PyGazpar/issues/84) : Add a function to retrieve list of PCE ids.
+[#84](https://github.com/ssenart/pygazpar/issues/84) : Add a function to retrieve list of PCE ids.
 
 ### Changed
 
-[#85](https://github.com/ssenart/PyGazpar/issues/85) : Move to Poetry dependency/package management tool.
+[#85](https://github.com/ssenart/pygazpar/issues/85) : Move to Poetry dependency/package management tool.
 
-## [1.2.8](https://github.com/ssenart/PyGazpar/compare/1.2.8...1.2.7) - 2025-01-11
+## [1.2.8](https://github.com/ssenart/pygazpar/compare/1.2.8...1.2.7) - 2025-01-11
 
 ### Added
-- [#81](https://github.com/ssenart/PyGazpar/issues/81): Add meter/temperature debug log messages to help investigation in case of errors.
+- [#81](https://github.com/ssenart/pygazpar/issues/81): Add meter/temperature debug log messages to help investigation in case of errors.
 
-## [1.2.7](https://github.com/ssenart/PyGazpar/compare/1.2.7...1.2.6) - 2025-01-06
-
-### Fixed
-- [#79](https://github.com/ssenart/PyGazpar/issues/79): Fix some unittests that wrongly failed because of the new year.
-
-## [1.2.6](https://github.com/ssenart/PyGazpar/compare/1.2.6...1.2.5) - 2025-01-03
+## [1.2.7](https://github.com/ssenart/pygazpar/compare/1.2.7...1.2.6) - 2025-01-06
 
 ### Fixed
-- [#77](https://github.com/ssenart/PyGazpar/issues/77): Some error may occur while requesting data from GrDF API.
+- [#79](https://github.com/ssenart/pygazpar/issues/79): Fix some unittests that wrongly failed because of the new year.
 
-## [1.2.5](https://github.com/ssenart/PyGazpar/compare/1.2.5...1.2.4) - 2024-12-21
-
-### Fixed
-- [#75](https://github.com/ssenart/PyGazpar/issues/75): Fix an error when no temperature data is available.
-
-## [1.2.4](https://github.com/ssenart/PyGazpar/compare/1.2.4...1.2.3) - 2024-10-09
+## [1.2.6](https://github.com/ssenart/pygazpar/compare/1.2.6...1.2.5) - 2025-01-03
 
 ### Fixed
-- [#72](https://github.com/ssenart/PyGazpar/issues/72): Remove the warning message "UserWarning: Boolean Series key will be reindexed to match DataFrame index. df = pd.concat([df[(df["count"] >= 7)], df.tail(1)[df["count"] < 7]])".
+- [#77](https://github.com/ssenart/pygazpar/issues/77): Some error may occur while requesting data from GrDF API.
 
-## [1.2.3](https://github.com/ssenart/PyGazpar/compare/1.2.3...1.2.1) - 2024-10-05
+## [1.2.5](https://github.com/ssenart/pygazpar/compare/1.2.5...1.2.4) - 2024-12-21
+
+### Fixed
+- [#75](https://github.com/ssenart/pygazpar/issues/75): Fix an error when no temperature data is available.
+
+## [1.2.4](https://github.com/ssenart/pygazpar/compare/1.2.4...1.2.3) - 2024-10-09
+
+### Fixed
+- [#72](https://github.com/ssenart/pygazpar/issues/72): Remove the warning message "UserWarning: Boolean Series key will be reindexed to match DataFrame index. df = pd.concat([df[(df["count"] >= 7)], df.tail(1)[df["count"] < 7]])".
+
+## [1.2.3](https://github.com/ssenart/pygazpar/compare/1.2.3...1.2.1) - 2024-10-05
 
 ### Added
-- [#70](https://github.com/ssenart/PyGazpar/issues/70): Add Python 3.12 support.
+- [#70](https://github.com/ssenart/pygazpar/issues/70): Add Python 3.12 support.
 
-## [1.2.2](https://github.com/ssenart/PyGazpar/compare/1.2.1...1.2.2) - 2024-05-08
-
-### Fixed
-- [#65](https://github.com/ssenart/PyGazpar/issues/65): [Bug] PermissionError happens when loading data from Excel file.
-
-## [1.2.1](https://github.com/ssenart/PyGazpar/compare/1.2.0...1.2.1) - 2024-05-04
+## [1.2.2](https://github.com/ssenart/pygazpar/compare/1.2.1...1.2.2) - 2024-05-08
 
 ### Fixed
-- [#64](https://github.com/ssenart/PyGazpar/issues/64): [Issue] Captcha failed issue.
+- [#65](https://github.com/ssenart/pygazpar/issues/65): [Bug] PermissionError happens when loading data from Excel file.
 
-- [#63](https://github.com/ssenart/PyGazpar/issues/63): [Bug] If the latest received consumption is Sunday, then the last weekly period is duplicated.
+## [1.2.1](https://github.com/ssenart/pygazpar/compare/1.2.0...1.2.1) - 2024-05-04
 
-## [1.2.0](https://github.com/ssenart/PyGazpar/compare/1.1.6...1.2.0) - 2022-12-16
+### Fixed
+- [#64](https://github.com/ssenart/pygazpar/issues/64): [Issue] Captcha failed issue.
+
+- [#63](https://github.com/ssenart/pygazpar/issues/63): [Bug] If the latest received consumption is Sunday, then the last weekly period is duplicated.
+
+## [1.2.0](https://github.com/ssenart/pygazpar/compare/1.1.6...1.2.0) - 2022-12-16
 
 ### Changed
-- [#59](https://github.com/ssenart/PyGazpar/issues/59): [Feature] Support both Excel and Json data source format from GrDF site.
+- [#59](https://github.com/ssenart/pygazpar/issues/59): [Feature] Support both Excel and Json data source format from GrDF site.
 
-- [#60](https://github.com/ssenart/PyGazpar/issues/60): [Feature] Permit to load data at multiple frequencies with one method call.
+- [#60](https://github.com/ssenart/pygazpar/issues/60): [Feature] Permit to load data at multiple frequencies with one method call.
 
 ### Fixed
-- [#47](https://github.com/ssenart/PyGazpar/issues/47): [Bug] No temperature field available.
+- [#47](https://github.com/ssenart/pygazpar/issues/47): [Bug] No temperature field available.
 
-- [#58](https://github.com/ssenart/PyGazpar/issues/58): [Issue] No data update - GrDF web site is half broken - Download button does not work anymore.
+- [#58](https://github.com/ssenart/pygazpar/issues/58): [Issue] No data update - GrDF web site is half broken - Download button does not work anymore.
 
-## [1.1.6](https://github.com/ssenart/PyGazpar/compare/1.1.5...1.1.6) - 2022-11-16
+## [1.1.6](https://github.com/ssenart/pygazpar/compare/1.1.5...1.1.6) - 2022-11-16
 ### Fixed
-- [#55](https://github.com/ssenart/PyGazpar/issues/55): Problème de connexion.
+- [#55](https://github.com/ssenart/pygazpar/issues/55): Problème de connexion.
 
-## [1.1.5](https://github.com/ssenart/PyGazpar/compare/1.1.4...1.1.5) - 2022-07-11
+## [1.1.5](https://github.com/ssenart/pygazpar/compare/1.1.4...1.1.5) - 2022-07-11
 ### Fixed
-- [#49](https://github.com/ssenart/PyGazpar/issues/49): Authentication failure.
+- [#49](https://github.com/ssenart/pygazpar/issues/49): Authentication failure.
 
-## [1.1.4](https://github.com/ssenart/PyGazpar/compare/1.1.2...1.1.4) - 2022-01-18
+## [1.1.4](https://github.com/ssenart/pygazpar/compare/1.1.2...1.1.4) - 2022-01-18
 ### Changed
-- [#43](https://github.com/ssenart/PyGazpar/issues/43): Downloaded Excel file name has changed from Donnees_informatives_PCE_$dateDebut_$dateFin.xlsx to Donnees_informatives_$numeroPCE_$dateDebut_$dateFin.xlsx.
+- [#43](https://github.com/ssenart/pygazpar/issues/43): Downloaded Excel file name has changed from Donnees_informatives_PCE_$dateDebut_$dateFin.xlsx to Donnees_informatives_$numeroPCE_$dateDebut_$dateFin.xlsx.
 
-## [1.1.2](https://github.com/ssenart/PyGazpar/compare/1.1.1...1.1.2) - 2022-01-08
+## [1.1.2](https://github.com/ssenart/pygazpar/compare/1.1.1...1.1.2) - 2022-01-08
 ### Fixed
-- [#39](https://github.com/ssenart/PyGazpar/issues/39): NameError: name 'Frequency' is not defined (thanks [nicolas-r](https://github.com/nicolas-r)).
+- [#39](https://github.com/ssenart/pygazpar/issues/39): NameError: name 'Frequency' is not defined (thanks [nicolas-r](https://github.com/nicolas-r)).
 - Numéro PCE pas forcément un nombre: Le numéro PCE de mon compteur commence par un 0 et lorsque j'essaie de récupérer mes relevés avec PyGazpar, une erreur de l'API est renvoyée. Le numéro PCE ne doit donc pas être converti en int lorsque il est passé en paramètre mais doit être une string (thanks  [maelgangloff](https://github.com/maelgangloff)).
 
-## [1.1.1](https://github.com/ssenart/PyGazpar/compare/1.1.0...1.1.1) - 2021-12-02
+## [1.1.1](https://github.com/ssenart/pygazpar/compare/1.1.0...1.1.1) - 2021-12-02
 ### Changed
 - Exact same version as 1.1.0 except that 1.1.0 has not been published on Pypi repository.
 
-## [1.1.0](https://github.com/ssenart/PyGazpar/compare/1.0.2...1.1.0) - 2021-12-02
+## [1.1.0](https://github.com/ssenart/pygazpar/compare/1.0.2...1.1.0) - 2021-12-02
 ### Changed
 - Remove Selenium usage and use simple Web request for login and data retrieval.
 
-## [1.0.2](https://github.com/ssenart/PyGazpar/compare/1.0.1...1.0.2) - 2021-11-25
+## [1.0.2](https://github.com/ssenart/pygazpar/compare/1.0.1...1.0.2) - 2021-11-25
 ### Fixed
 - Fix broken command line pygazpar caused by adding the new lastNDays parameter.
 - Fix the error : ValueError: could not convert string to float: 'Index de début de période (m3)'. It occurs because the records in the Excel file now starts at line 10 instead of line 8 before (thanks to [DEFAYArnaud](https://github.com/DEFAYArnaud) for having spotted the issue and bringing the fix).
@@ -107,20 +349,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - In the Excel file, if a cell is empty, then no corresponding key will be inserted in the result dictionary (before we inserted a key with an empty string).
 
-## [1.0.1](https://github.com/ssenart/PyGazpar/compare/1.0.0...1.0.1) - 2021-11-24
+## [1.0.1](https://github.com/ssenart/pygazpar/compare/1.0.0...1.0.1) - 2021-11-24
 ### Fixed
 - Fix typo warning from Pylance preventing 1.0.0 to be published.
 
-## [1.0.0](https://github.com/ssenart/PyGazpar/compare/0.2.0...1.0.0) - 2021-11-24
+## [1.0.0](https://github.com/ssenart/pygazpar/compare/0.2.0...1.0.0) - 2021-11-24
 ### Added
 - New lastNDays parameter to query data only over the last N days period.
 
 ### Fixed
-- [#18](https://github.com/ssenart/PyGazpar/issues/18): PyGazpar broken since GRDF Monespace has been upgraded to a new version.
+- [#18](https://github.com/ssenart/pygazpar/issues/18): PyGazpar broken since GRDF Monespace has been upgraded to a new version.
 
-## [0.2.0](https://github.com/ssenart/PyGazpar/compare/0.1.27...0.2.0) - 2021-04-21
+## [0.2.0](https://github.com/ssenart/pygazpar/compare/0.1.27...0.2.0) - 2021-04-21
 ### Added
-- [#12](https://github.com/ssenart/PyGazpar/issues/10): Be able to retrieve consumption not only on a daily basis, but weekly and monthly:
+- [#12](https://github.com/ssenart/pygazpar/issues/10): Be able to retrieve consumption not only on a daily basis, but weekly and monthly:
     - API : Add a new parameter 'meterReadingFrequency' to Client that accepts enumeration: Frequency.DAILY, Frequency.WEEKLY or Frequency.MONTHLY.
     - Command line : Add a new argument '--frequency' that accepts values : DAILY, WEEKLY or MONTHLY.
 - Be able to test using offline data :
@@ -133,13 +375,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - 'converter_factor' => 'converter_factor_kwh/m3'.
     - 'local_temperature' => 'temperature_degC'.
 
-## [0.1.27](https://github.com/ssenart/PyGazpar/compare/0.1.26...0.1.27) - 2021-04-20
+## [0.1.27](https://github.com/ssenart/pygazpar/compare/0.1.26...0.1.27) - 2021-04-20
 ### Fixed
-- [#10](https://github.com/ssenart/PyGazpar/issues/10) : Does not download data file in tmpdir as expected (instead it is downloaded in the default user Download directory). The previous attempt in version 0.1.26 is a failure. The origin of the bug is that we send a relative tmp directory path to Webdriver. Additionally, this path has to be normalized to the runtime OS (using slash or backslash).
+- [#10](https://github.com/ssenart/pygazpar/issues/10) : Does not download data file in tmpdir as expected (instead it is downloaded in the default user Download directory). The previous attempt in version 0.1.26 is a failure. The origin of the bug is that we send a relative tmp directory path to Webdriver. Additionally, this path has to be normalized to the runtime OS (using slash or backslash).
 
-## [0.1.26](https://github.com/ssenart/PyGazpar/compare/0.1.25...0.1.26) - 2021-04-18
+## [0.1.26](https://github.com/ssenart/pygazpar/compare/0.1.25...0.1.26) - 2021-04-18
 ### Fixed
-- [#10](https://github.com/ssenart/PyGazpar/issues/10) : Does not download data file in tmpdir as expected (instead it is downloaded in the default user Download directory).
+- [#10](https://github.com/ssenart/pygazpar/issues/10) : Does not download data file in tmpdir as expected (instead it is downloaded in the default user Download directory).
 
 ### Added
 - A new parameter to drive whether we want Selenium in headless mode or not (mainly for troubleshooting purpose).
@@ -239,23 +481,29 @@ It occurs with the page containing 'Jour' button which is very long to load (I i
 ### Removed
 - Remove Client.data property to get the updated data. Replaced with Client.__data private property.
 
-[0.1.25]: https://github.com/ssenart/PyGazpar/compare/0.1.24...0.1.25
-[0.1.24]: https://github.com/ssenart/PyGazpar/compare/0.1.23...0.1.24
-[0.1.23]: https://github.com/ssenart/PyGazpar/compare/0.1.22...0.1.23
-[0.1.22]: https://github.com/ssenart/PyGazpar/compare/0.1.21...0.1.22
-[0.1.21]: https://github.com/ssenart/PyGazpar/compare/0.1.20...0.1.21
-[0.1.20]: https://github.com/ssenart/PyGazpar/compare/0.1.19...0.1.20
-[0.1.19]: https://github.com/ssenart/PyGazpar/compare/0.1.17...0.1.19
-[0.1.18]: https://github.com/ssenart/PyGazpar/compare/0.1.17...0.1.18
-[0.1.17]: https://github.com/ssenart/PyGazpar/compare/0.1.16...0.1.17
-[0.1.16]: https://github.com/ssenart/PyGazpar/compare/0.1.15...0.1.16
-[0.1.15]: https://github.com/ssenart/PyGazpar/compare/0.1.14...0.1.15
-[0.1.14]: https://github.com/ssenart/PyGazpar/compare/0.1.13...0.1.14
-[0.1.13]: https://github.com/ssenart/PyGazpar/compare/0.1.12...0.1.13
-[0.1.12]: https://github.com/ssenart/PyGazpar/compare/0.1.11...0.1.12
-[0.1.11]: https://github.com/ssenart/PyGazpar/compare/0.1.10...0.1.11
-[0.1.10]: https://github.com/ssenart/PyGazpar/compare/0.1.9...0.1.10
-[0.1.9]: https://github.com/ssenart/PyGazpar/compare/0.1.7...0.1.9
-[0.1.8]: https://github.com/ssenart/PyGazpar/compare/0.1.7...0.1.8
-[0.1.7]: https://github.com/ssenart/PyGazpar/compare/0.1.6...0.1.7
-[0.1.6]: https://github.com/ssenart/PyGazpar/compare/0.1.5...0.1.6
+[Unreleased]: https://github.com/ssenart/pygazpar/compare/1.4.0a7...HEAD
+[1.4.0a7]: https://github.com/ssenart/pygazpar/compare/1.4.0a6...1.4.0a7
+[1.4.0a6]: https://github.com/ssenart/pygazpar/compare/1.4.0a5...1.4.0a6
+[1.4.0a5]: https://github.com/ssenart/pygazpar/compare/1.4.0a4...1.4.0a5
+[1.4.0a4]: https://github.com/ssenart/pygazpar/compare/1.4.0a3...1.4.0a4
+[1.4.0a3]: https://github.com/ssenart/pygazpar/compare/1.4.0a2...1.4.0a3
+[0.1.25]: https://github.com/ssenart/pygazpar/compare/0.1.24...0.1.25
+[0.1.24]: https://github.com/ssenart/pygazpar/compare/0.1.23...0.1.24
+[0.1.23]: https://github.com/ssenart/pygazpar/compare/0.1.22...0.1.23
+[0.1.22]: https://github.com/ssenart/pygazpar/compare/0.1.21...0.1.22
+[0.1.21]: https://github.com/ssenart/pygazpar/compare/0.1.20...0.1.21
+[0.1.20]: https://github.com/ssenart/pygazpar/compare/0.1.19...0.1.20
+[0.1.19]: https://github.com/ssenart/pygazpar/compare/0.1.17...0.1.19
+[0.1.18]: https://github.com/ssenart/pygazpar/compare/0.1.17...0.1.18
+[0.1.17]: https://github.com/ssenart/pygazpar/compare/0.1.16...0.1.17
+[0.1.16]: https://github.com/ssenart/pygazpar/compare/0.1.15...0.1.16
+[0.1.15]: https://github.com/ssenart/pygazpar/compare/0.1.14...0.1.15
+[0.1.14]: https://github.com/ssenart/pygazpar/compare/0.1.13...0.1.14
+[0.1.13]: https://github.com/ssenart/pygazpar/compare/0.1.12...0.1.13
+[0.1.12]: https://github.com/ssenart/pygazpar/compare/0.1.11...0.1.12
+[0.1.11]: https://github.com/ssenart/pygazpar/compare/0.1.10...0.1.11
+[0.1.10]: https://github.com/ssenart/pygazpar/compare/0.1.9...0.1.10
+[0.1.9]: https://github.com/ssenart/pygazpar/compare/0.1.7...0.1.9
+[0.1.8]: https://github.com/ssenart/pygazpar/compare/0.1.7...0.1.8
+[0.1.7]: https://github.com/ssenart/pygazpar/compare/0.1.6...0.1.7
+[0.1.6]: https://github.com/ssenart/pygazpar/compare/0.1.5...0.1.6

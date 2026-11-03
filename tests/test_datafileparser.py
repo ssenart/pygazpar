@@ -1,9 +1,8 @@
-from pygazpar.enum import Frequency
 from pygazpar.excelparser import ExcelParser
+from pygazpar.model import Frequency
 
 
 class TestDataFileParser:
-
     # ------------------------------------------------------
     def test_daily_sample(self):
         data = ExcelParser.parse("tests/resources/Donnees_informatives_PCE_DAILY.xlsx", Frequency.DAILY)

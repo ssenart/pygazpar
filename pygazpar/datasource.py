@@ -1,18 +1,26 @@
-import glob
 import json
 import logging
 import os
+import tempfile
+import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from datetime import date, timedelta
-from typing import Any, Optional, cast
+from typing import Any, cast
 
-import pandas as pd
-
-from pygazpar.api_client import APIClient, ConsumptionType
-from pygazpar.api_client import Frequency as APIClientFrequency
-from pygazpar.enum import Frequency, PropertyName
+from pygazpar.api_client import DEFAULT_EXCEL_FILENAME, APIClient, ConsumptionType, GrdfFrequency
+from pygazpar.errors import UnknownPceError
 from pygazpar.excelparser import ExcelParser
 from pygazpar.jsonparser import JsonParser
+from pygazpar.model import MONTHS as MONTH_NAMES
+from pygazpar.model import (
+    DailyReading,
+    Frequency,
+    PeriodReading,
+    PropertyName,
+    next_month_start,
+    parse_period_label,
+)
 
 Logger = logging.getLogger(__name__)
 
@@ -20,18 +28,59 @@ MeterReading = dict[str, Any]
 
 MeterReadings = list[MeterReading]
 
-MeterReadingsByFrequency = dict[str, MeterReadings]
+MeterReadingsByFrequency = dict[Frequency, MeterReadings]
+
+ReadingsByFrequency = dict[Frequency, Sequence[PeriodReading]]
+
+
+def as_dicts(readings: Sequence[PeriodReading]) -> MeterReadings:
+    """Returns the readings as dicts, the form the datasources give to their users."""
+
+    return [reading.model_dump(by_alias=True) for reading in readings]
+
+
+def readings_from_samples(frequency: Frequency, rows: list[dict[str, Any]]) -> list[PeriodReading]:
+    """Returns the readings of a sample file. The dates of each reading come from its label."""
+
+    model = DailyReading if frequency == Frequency.DAILY else PeriodReading
+    res: list[PeriodReading] = []
+    for row in rows:
+        start_date, end_date = parse_period_label(frequency, row[PropertyName.TIME_PERIOD.value])
+        res.append(
+            model.model_validate(
+                {
+                    **row,
+                    PropertyName.START_DATE.value: start_date,
+                    PropertyName.END_DATE.value: end_date,
+                    PropertyName.FREQUENCY.value: frequency,
+                }
+            )
+        )
+
+    return res
 
 
 # ------------------------------------------------------------------------------------------------------------
-class IDataSource(ABC):  # pylint: disable=too-few-public-methods
+def meteo_window(start_date: date, end_date: date) -> tuple[date, int]:
+    """Returns the end date and the number of days to request temperatures for a consumption period.
 
+    The end date is capped at yesterday, and the number of days is kept between 10 and 730 to avoid HTTP 500 errors.
+    """
+
+    meteo_end_date = date.today() - timedelta(days=1) if end_date >= date.today() else end_date
+    meteo_days = max(min((meteo_end_date - start_date).days, 730), 10)
+
+    return meteo_end_date, meteo_days
+
+
+# ------------------------------------------------------------------------------------------------------------
+class IDataSource(ABC):
     @abstractmethod
-    def login(self):
+    def login(self) -> None:
         pass
 
     @abstractmethod
-    def logout(self):
+    def logout(self) -> None:
         pass
 
     @abstractmethod
@@ -39,28 +88,38 @@ class IDataSource(ABC):  # pylint: disable=too-few-public-methods
         pass
 
     @abstractmethod
-    def load(
-        self, pceIdentifier: str, startDate: date, endDate: date, frequencies: Optional[list[Frequency]] = None
-    ) -> MeterReadingsByFrequency:
+    def readings(
+        self, pce_identifier: str, start_date: date, end_date: date, frequencies: list[Frequency] | None = None
+    ) -> ReadingsByFrequency:
         pass
+
+    # ------------------------------------------------------
+    def load(
+        self, pce_identifier: str, start_date: date, end_date: date, frequencies: list[Frequency] | None = None
+    ) -> MeterReadingsByFrequency:
+        """Returns the readings as dicts, the form the datasources give to their users."""
+
+        return {
+            key: as_dicts(value)
+            for key, value in self.readings(pce_identifier, start_date, end_date, frequencies).items()
+        }
 
 
 # ------------------------------------------------------------------------------------------------------------
-class WebDataSource(IDataSource):  # pylint: disable=too-few-public-methods
-
+class WebDataSource(IDataSource):
     # ------------------------------------------------------
     def __init__(self, username: str, password: str):
 
         self._api_client = APIClient(username, password)
 
     # ------------------------------------------------------
-    def login(self):
+    def login(self) -> None:
 
         if not self._api_client.is_logged_in():
             self._api_client.login()
 
     # ------------------------------------------------------
-    def logout(self):
+    def logout(self) -> None:
 
         if self._api_client.is_logged_in():
             self._api_client.logout()
@@ -76,32 +135,34 @@ class WebDataSource(IDataSource):  # pylint: disable=too-few-public-methods
         if pce_list is None:
             return []
 
-        return [pce["idObject"] for pce in pce_list]
+        return [pce.id_object for pce in pce_list]
 
     # ------------------------------------------------------
-    def load(
-        self, pceIdentifier: str, startDate: date, endDate: date, frequencies: Optional[list[Frequency]] = None
-    ) -> MeterReadingsByFrequency:
+    def readings(
+        self, pce_identifier: str, start_date: date, end_date: date, frequencies: list[Frequency] | None = None
+    ) -> ReadingsByFrequency:
 
         if not self._api_client.is_logged_in():
             self._api_client.login()
 
-        res = self._loadFromSession(pceIdentifier, startDate, endDate, frequencies)
+        if pce_identifier not in self.get_pce_identifiers():
+            raise UnknownPceError(pce_identifier)
+
+        res = self._load_from_session(pce_identifier, start_date, end_date, frequencies)
 
         Logger.debug("The data update terminates normally")
 
         return res
 
     @abstractmethod
-    def _loadFromSession(
-        self, pceIdentifier: str, startDate: date, endDate: date, frequencies: Optional[list[Frequency]] = None
-    ) -> MeterReadingsByFrequency:
+    def _load_from_session(
+        self, pce_identifier: str, start_date: date, end_date: date, frequencies: list[Frequency] | None = None
+    ) -> ReadingsByFrequency:
         pass
 
 
 # ------------------------------------------------------------------------------------------------------------
-class ExcelWebDataSource(WebDataSource):  # pylint: disable=too-few-public-methods
-
+class ExcelWebDataSource(WebDataSource):
     DATE_FORMAT = "%Y-%m-%d"
 
     FREQUENCY_VALUES = {
@@ -112,97 +173,89 @@ class ExcelWebDataSource(WebDataSource):  # pylint: disable=too-few-public-metho
         Frequency.YEARLY: "Journalier",
     }
 
-    DATA_FILENAME = "Donnees_informatives_*.xlsx"
-
     # ------------------------------------------------------
-    def __init__(self, username: str, password: str, tmpDirectory: str):
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        tmp_directory: str | None = None,
+        *,
+        tmpDirectory: str | None = None,  # noqa: N803
+    ):
 
         super().__init__(username, password)
 
-        self.__tmpDirectory = tmpDirectory
+        if tmpDirectory is not None:
+            warnings.warn(
+                "The tmpDirectory parameter is deprecated. Please migrate to the tmp_directory parameter",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            tmp_directory = tmp_directory or tmpDirectory
+
+        if tmp_directory is None:
+            raise TypeError("ExcelWebDataSource needs a tmp_directory")
+
+        self._tmp_directory = tmp_directory
 
     # ------------------------------------------------------
-    def _loadFromSession(  # pylint: disable=too-many-branches
-        self, pceIdentifier: str, startDate: date, endDate: date, frequencies: Optional[list[Frequency]] = None
-    ) -> MeterReadingsByFrequency:  # pylint: disable=too-many-branches
+    def _load_from_session(
+        self, pce_identifier: str, start_date: date, end_date: date, frequencies: list[Frequency] | None = None
+    ) -> ReadingsByFrequency:
 
-        res = {}
-
-        # XLSX is in the TMP directory
-        data_file_path_pattern = self.__tmpDirectory + "/" + ExcelWebDataSource.DATA_FILENAME
-
-        # We remove an eventual existing data file (from a previous run that has not deleted it).
-        file_list = glob.glob(data_file_path_pattern)
-        for filename in file_list:
-            if os.path.isfile(filename):
-                try:
-                    os.remove(filename)
-                except PermissionError:
-                    pass
+        res: ReadingsByFrequency = {}
 
         if frequencies is None:
             # Transform Enum in List.
-            frequencyList = list(Frequency)
+            frequency_list = list(Frequency)
         else:
             # Get distinct values.
-            frequencyList = list(set(frequencies))
+            frequency_list = list(set(frequencies))
 
-        for frequency in frequencyList:
-
+        for frequency in frequency_list:
             Logger.debug(
-                f"Loading data of frequency {ExcelWebDataSource.FREQUENCY_VALUES[frequency]} from {startDate.strftime(ExcelWebDataSource.DATE_FORMAT)} to {endDate.strftime(ExcelWebDataSource.DATE_FORMAT)}"
+                f"Loading data of frequency {ExcelWebDataSource.FREQUENCY_VALUES[frequency]} from {start_date.strftime(ExcelWebDataSource.DATE_FORMAT)} to {end_date.strftime(ExcelWebDataSource.DATE_FORMAT)}"
             )
 
             response = self._api_client.get_pce_consumption_excelsheet(
                 ConsumptionType.INFORMATIVE,
-                startDate,
-                endDate,
-                APIClientFrequency(ExcelWebDataSource.FREQUENCY_VALUES[frequency]),
-                [pceIdentifier],
+                start_date,
+                end_date,
+                GrdfFrequency(ExcelWebDataSource.FREQUENCY_VALUES[frequency]),
+                [pce_identifier],
             )
 
-            filename = response["filename"]
-            content = response["content"]
+            # The XLSX file lives in a private directory under the TMP directory: nothing else can collide with it, and
+            # the directory is removed even when the parsing fails. openpyxl does not close the file properly, hence
+            # ignore_cleanup_errors.
+            with tempfile.TemporaryDirectory(dir=self._tmp_directory, ignore_cleanup_errors=True) as directory:
+                data_file_path = os.path.join(directory, DEFAULT_EXCEL_FILENAME)
+                with open(data_file_path, "wb") as file:
+                    file.write(response.content)
 
-            with open(f"{self.__tmpDirectory}/{filename}", "wb") as file:
-                file.write(content)
-
-            # Load the XLSX file into the data structure
-            file_list = glob.glob(data_file_path_pattern)
-
-            if len(file_list) == 0:
-                Logger.warning(f"Not any data file has been found in '{self.__tmpDirectory}' directory")
-
-            for filename in file_list:
-                res[frequency.value] = ExcelParser.parse(
-                    filename, frequency if frequency != Frequency.YEARLY else Frequency.DAILY
+                res[frequency] = ExcelParser.parse(
+                    data_file_path, frequency if frequency != Frequency.YEARLY else Frequency.DAILY
                 )
-                try:
-                    # openpyxl does not close the file properly.
-                    os.remove(filename)
-                except PermissionError:
-                    pass
 
             # We compute yearly from daily data.
             if frequency == Frequency.YEARLY:
-                res[frequency.value] = FrequencyConverter.computeYearly(res[frequency.value])
+                res[frequency] = FrequencyConverter.compute_yearly(res[frequency])
 
         return res
 
 
 # ------------------------------------------------------------------------------------------------------------
-class ExcelFileDataSource(IDataSource):  # pylint: disable=too-few-public-methods
+class ExcelFileDataSource(IDataSource):
+    def __init__(self, excel_file: str):
 
-    def __init__(self, excelFile: str):
-
-        self.__excelFile = excelFile
+        self._excel_file = excel_file
 
     # ------------------------------------------------------
-    def login(self):
+    def login(self) -> None:
         pass
 
     # ------------------------------------------------------
-    def logout(self):
+    def logout(self) -> None:
         pass
 
     # ------------------------------------------------------
@@ -211,106 +264,183 @@ class ExcelFileDataSource(IDataSource):  # pylint: disable=too-few-public-method
         return ["0123456789"]
 
     # ------------------------------------------------------
-    def load(
-        self, pceIdentifier: str, startDate: date, endDate: date, frequencies: Optional[list[Frequency]] = None
-    ) -> MeterReadingsByFrequency:
+    def readings(
+        self,
+        pce_identifier: str,  # noqa: ARG002
+        start_date: date,  # noqa: ARG002
+        end_date: date,  # noqa: ARG002
+        frequencies: list[Frequency] | None = None,
+    ) -> ReadingsByFrequency:
 
-        res = {}
+        res: ReadingsByFrequency = {}
 
         if frequencies is None:
             # Transform Enum in List.
-            frequencyList = list(Frequency)
+            frequency_list = list(Frequency)
         else:
             # Get unique values.
-            frequencyList = list(set(frequencies))
+            frequency_list = list(set(frequencies))
 
-        for frequency in frequencyList:
+        for frequency in frequency_list:
             if frequency != Frequency.YEARLY:
-                res[frequency.value] = ExcelParser.parse(self.__excelFile, frequency)
+                res[frequency] = ExcelParser.parse(self._excel_file, frequency)
             else:
-                daily = ExcelParser.parse(self.__excelFile, Frequency.DAILY)
-                res[frequency.value] = FrequencyConverter.computeYearly(daily)
+                daily = ExcelParser.parse(self._excel_file, Frequency.DAILY)
+                res[frequency] = FrequencyConverter.compute_yearly(daily)
 
         return res
 
 
 # ------------------------------------------------------------------------------------------------------------
-class JsonWebDataSource(WebDataSource):  # pylint: disable=too-few-public-methods
-
+class JsonWebDataSource(WebDataSource):
     INPUT_DATE_FORMAT = "%Y-%m-%d"
 
     OUTPUT_DATE_FORMAT = "%d/%m/%Y"
 
     # ------------------------------------------------------
-    def _loadFromSession(
-        self, pceIdentifier: str, startDate: date, endDate: date, frequencies: Optional[list[Frequency]] = None
-    ) -> MeterReadingsByFrequency:
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        consumption_type: ConsumptionType = ConsumptionType.INFORMATIVE,
+    ):
+        super().__init__(username, password)
+        self._consumption_type = consumption_type
 
-        res = dict[str, Any]()
+    # ------------------------------------------------------
+    def _load_from_session(
+        self, pce_identifier: str, start_date: date, end_date: date, frequencies: list[Frequency] | None = None
+    ) -> ReadingsByFrequency:
 
-        computeByFrequency = {
-            Frequency.HOURLY: FrequencyConverter.computeHourly,
-            Frequency.DAILY: FrequencyConverter.computeDaily,
-            Frequency.WEEKLY: FrequencyConverter.computeWeekly,
-            Frequency.MONTHLY: FrequencyConverter.computeMonthly,
-            Frequency.YEARLY: FrequencyConverter.computeYearly,
+        res: ReadingsByFrequency = {}
+
+        compute_by_frequency = {
+            Frequency.HOURLY: FrequencyConverter.compute_hourly,
+            Frequency.DAILY: FrequencyConverter.compute_daily,
+            Frequency.WEEKLY: FrequencyConverter.compute_weekly,
+            Frequency.MONTHLY: FrequencyConverter.compute_monthly,
+            Frequency.YEARLY: FrequencyConverter.compute_yearly,
         }
 
-        data = self._api_client.get_pce_consumption(ConsumptionType.INFORMATIVE, startDate, endDate, [pceIdentifier])
+        data = self._api_client.get_pce_consumption(self._consumption_type, start_date, end_date, [pce_identifier])
 
         Logger.debug("Json meter data: %s", data)
 
-        # Temperatures URL: Inject parameters.
-        endDate = date.today() - timedelta(days=1) if endDate >= date.today() else endDate
-        days = max(
-            min((endDate - startDate).days, 730), 10
-        )  # At least 10 days, at most 730 days, to avoid HTTP 500 error.
+        meteo_end_date, meteo_days = meteo_window(start_date, end_date)
 
         # Get weather data.
         try:
-            temperatures = self._api_client.get_pce_meteo(endDate, days, pceIdentifier)
-        except Exception:  # pylint: disable=broad-except
-            # Not a blocking error.
+            temperatures = self._api_client.get_pce_meteo(meteo_end_date, meteo_days, pce_identifier)
+        except Exception as error:  # noqa: BLE001
+            # Not a blocking error: the readings are returned without temperatures.
+            Logger.warning("The temperatures are not available, the readings have none: %s", error)
             temperatures = None
 
         Logger.debug("Json temperature data: %s", temperatures)
 
+        if frequencies is None:
+            # Transform Enum in List.
+            frequency_list = list(Frequency)
+        else:
+            # Get unique values.
+            frequency_list = list(set(frequencies))
+
         # Transform all the data into the target structure.
         if data is None or len(data) == 0:
-            return res
+            # No data: every requested frequency has an empty list of readings, as with data.
+            return {frequency: [] for frequency in frequency_list}
 
-        daily = JsonParser.parse(json.dumps(data), json.dumps(temperatures), pceIdentifier)
+        daily = JsonParser.readings(data, temperatures, pce_identifier)
 
         Logger.debug("Processed daily data: %s", daily)
 
-        if frequencies is None:
-            # Transform Enum in List.
-            frequencyList = list(Frequency)
-        else:
-            # Get unique values.
-            frequencyList = list(set(frequencies))
-
-        for frequency in frequencyList:
-            res[frequency.value] = computeByFrequency[frequency](daily)
+        for frequency in frequency_list:
+            res[frequency] = compute_by_frequency[frequency](daily)
 
         return res
 
 
 # ------------------------------------------------------------------------------------------------------------
-class JsonFileDataSource(IDataSource):  # pylint: disable=too-few-public-methods
+class RawWebDataSource(ABC):
+    """Returns a GrDF API response as received, without post processing.
+
+    Not an IDataSource: load() returns the raw payload, not a MeterReadingsByFrequency. Like the IDataSource, it logs in
+    when it needs to, and can be logged out.
+    """
 
     # ------------------------------------------------------
-    def __init__(self, consumptionJsonFile: str, temperatureJsonFile):
+    def __init__(self, username: str, password: str):
 
-        self.__consumptionJsonFile = consumptionJsonFile
-        self.__temperatureJsonFile = temperatureJsonFile
+        self._api_client = APIClient(username, password)
 
     # ------------------------------------------------------
-    def login(self):
+    def login(self) -> None:
+
+        if not self._api_client.is_logged_in():
+            self._api_client.login()
+
+    # ------------------------------------------------------
+    def logout(self) -> None:
+
+        if self._api_client.is_logged_in():
+            self._api_client.logout()
+
+    # ------------------------------------------------------
+    @abstractmethod
+    def load(self, pce_identifier: str, start_date: date, end_date: date) -> dict[str, Any]:
+        pass
+
+
+# ------------------------------------------------------------------------------------------------------------
+class RawConsumptionWebDataSource(RawWebDataSource):
+    """Returns the GrDF consumption API response as received."""
+
+    # ------------------------------------------------------
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        consumption_type: ConsumptionType = ConsumptionType.INFORMATIVE,
+    ):
+        super().__init__(username, password)
+        self._consumption_type = consumption_type
+
+    # ------------------------------------------------------
+    def load(self, pce_identifier: str, start_date: date, end_date: date) -> dict[str, Any]:
+
+        self.login()
+
+        return self._api_client.get_pce_consumption_raw(self._consumption_type, start_date, end_date, [pce_identifier])
+
+
+# ------------------------------------------------------------------------------------------------------------
+class RawTemperatureWebDataSource(RawWebDataSource):
+    """Returns the GrDF temperature (meteo) API response as received."""
+
+    # ------------------------------------------------------
+    def load(self, pce_identifier: str, start_date: date, end_date: date) -> dict[str, Any]:
+
+        self.login()
+
+        meteo_end_date, meteo_days = meteo_window(start_date, end_date)
+
+        return self._api_client.get_pce_meteo_raw(meteo_end_date, meteo_days, pce_identifier)
+
+
+# ------------------------------------------------------------------------------------------------------------
+class JsonFileDataSource(IDataSource):
+    # ------------------------------------------------------
+    def __init__(self, consumption_json_file: str, temperature_json_file: str):
+
+        self._consumption_json_file = consumption_json_file
+        self._temperature_json_file = temperature_json_file
+
+    # ------------------------------------------------------
+    def login(self) -> None:
         pass
 
     # ------------------------------------------------------
-    def logout(self):
+    def logout(self) -> None:
         pass
 
     # ------------------------------------------------------
@@ -319,53 +449,58 @@ class JsonFileDataSource(IDataSource):  # pylint: disable=too-few-public-methods
         return ["0123456789"]
 
     # ------------------------------------------------------
-    def load(
-        self, pceIdentifier: str, startDate: date, endDate: date, frequencies: Optional[list[Frequency]] = None
-    ) -> MeterReadingsByFrequency:
+    def readings(
+        self,
+        pce_identifier: str,
+        start_date: date,  # noqa: ARG002
+        end_date: date,  # noqa: ARG002
+        frequencies: list[Frequency] | None = None,
+    ) -> ReadingsByFrequency:
 
-        res = {}
+        res: ReadingsByFrequency = {}
 
-        with open(self.__consumptionJsonFile, mode="r", encoding="utf-8") as consumptionJsonFile:
-            with open(self.__temperatureJsonFile, mode="r", encoding="utf-8") as temperatureJsonFile:
-                daily = JsonParser.parse(consumptionJsonFile.read(), temperatureJsonFile.read(), pceIdentifier)
+        with open(self._consumption_json_file, encoding="utf-8") as consumption_json_file:
+            with open(self._temperature_json_file, encoding="utf-8") as temperature_json_file:
+                daily = JsonParser.readings_from_json(
+                    consumption_json_file.read(), temperature_json_file.read(), pce_identifier
+                )
 
-        computeByFrequency = {
-            Frequency.HOURLY: FrequencyConverter.computeHourly,
-            Frequency.DAILY: FrequencyConverter.computeDaily,
-            Frequency.WEEKLY: FrequencyConverter.computeWeekly,
-            Frequency.MONTHLY: FrequencyConverter.computeMonthly,
-            Frequency.YEARLY: FrequencyConverter.computeYearly,
+        compute_by_frequency = {
+            Frequency.HOURLY: FrequencyConverter.compute_hourly,
+            Frequency.DAILY: FrequencyConverter.compute_daily,
+            Frequency.WEEKLY: FrequencyConverter.compute_weekly,
+            Frequency.MONTHLY: FrequencyConverter.compute_monthly,
+            Frequency.YEARLY: FrequencyConverter.compute_yearly,
         }
 
         if frequencies is None:
             # Transform Enum in List.
-            frequencyList = list(Frequency)
+            frequency_list = list(Frequency)
         else:
             # Get unique values.
-            frequencyList = list(set(frequencies))
+            frequency_list = list(set(frequencies))
 
-        for frequency in frequencyList:
-            res[frequency.value] = computeByFrequency[frequency](daily)
+        for frequency in frequency_list:
+            res[frequency] = compute_by_frequency[frequency](daily)
 
         return res
 
 
 # ------------------------------------------------------------------------------------------------------------
-class TestDataSource(IDataSource):  # pylint: disable=too-few-public-methods
-
+class TestDataSource(IDataSource):
     __test__ = False  # Will not be discovered as a test
 
     # ------------------------------------------------------
-    def __init__(self):
+    def __init__(self) -> None:
 
         pass
 
     # ------------------------------------------------------
-    def login(self):
+    def login(self) -> None:
         pass
 
     # ------------------------------------------------------
-    def logout(self):
+    def logout(self) -> None:
         pass
 
     # ------------------------------------------------------
@@ -374,13 +509,17 @@ class TestDataSource(IDataSource):  # pylint: disable=too-few-public-methods
         return ["0123456789"]
 
     # ------------------------------------------------------
-    def load(
-        self, pceIdentifier: str, startDate: date, endDate: date, frequencies: Optional[list[Frequency]] = None
-    ) -> MeterReadingsByFrequency:
+    def readings(
+        self,
+        pce_identifier: str,  # noqa: ARG002
+        start_date: date,  # noqa: ARG002
+        end_date: date,  # noqa: ARG002
+        frequencies: list[Frequency] | None = None,
+    ) -> ReadingsByFrequency:
 
-        res = dict[str, Any]()
+        res: ReadingsByFrequency = {}
 
-        dataSampleFilenameByFrequency = {
+        data_sample_filename_by_frequency = {
             Frequency.HOURLY: "hourly_data_sample.json",
             Frequency.DAILY: "daily_data_sample.json",
             Frequency.WEEKLY: "weekly_data_sample.json",
@@ -390,201 +529,110 @@ class TestDataSource(IDataSource):  # pylint: disable=too-few-public-methods
 
         if frequencies is None:
             # Transform Enum in List.
-            frequencyList = list(Frequency)
+            frequency_list = list(Frequency)
         else:
             # Get unique values.
-            frequencyList = list(set(frequencies))
+            frequency_list = list(set(frequencies))
 
-        for frequency in frequencyList:
-            dataSampleFilename = (
-                f"{os.path.dirname(os.path.abspath(__file__))}/resources/{dataSampleFilenameByFrequency[frequency]}"
+        for frequency in frequency_list:
+            data_sample_filename = (
+                f"{os.path.dirname(os.path.abspath(__file__))}/resources/{data_sample_filename_by_frequency[frequency]}"
             )
 
-            with open(dataSampleFilename, mode="r", encoding="utf-8") as jsonFile:
-                res[frequency.value] = cast(list[dict[PropertyName, Any]], json.load(jsonFile))
+            with open(data_sample_filename, encoding="utf-8") as json_file:
+                rows = cast(list[dict[str, Any]], json.load(json_file))
+                res[frequency] = [] if frequency == Frequency.HOURLY else readings_from_samples(frequency, rows)
 
         return res
 
 
 # ------------------------------------------------------------------------------------------------------------
 class FrequencyConverter:
-
-    MONTHS = [
-        "Janvier",
-        "Février",
-        "Mars",
-        "Avril",
-        "Mai",
-        "Juin",
-        "Juillet",
-        "Août",
-        "Septembre",
-        "Octobre",
-        "Novembre",
-        "Décembre",
-    ]
+    MONTHS = MONTH_NAMES
 
     # ------------------------------------------------------
     @staticmethod
-    def computeHourly(daily: list[dict[str, Any]]) -> list[dict[str, Any]]:  # pylint: disable=unused-argument
+    def compute_hourly(daily: Sequence[PeriodReading]) -> list[PeriodReading]:  # noqa: ARG004
 
         return []
 
     # ------------------------------------------------------
     @staticmethod
-    def computeDaily(daily: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def compute_daily(daily: Sequence[PeriodReading]) -> list[PeriodReading]:
 
-        return daily
+        return list(daily)
 
     # ------------------------------------------------------
     @staticmethod
-    def computeWeekly(daily: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def compute_weekly(daily: Sequence[PeriodReading]) -> list[PeriodReading]:
 
-        df = pd.DataFrame(daily)
-
-        # Trimming head and trailing spaces and convert to datetime.
-        df["date_time"] = pd.to_datetime(df["time_period"].str.strip(), format=JsonWebDataSource.OUTPUT_DATE_FORMAT)
-
-        # Get the first day of week.
-        df["first_day_of_week"] = pd.to_datetime(df["date_time"].dt.strftime("%W %Y 1"), format="%W %Y %w")
-
-        # Get the last day of week.
-        df["last_day_of_week"] = pd.to_datetime(df["date_time"].dt.strftime("%W %Y 0"), format="%W %Y %w")
-
-        # Reformat the time period.
-        df["time_period"] = (
-            "Du "
-            + df["first_day_of_week"].dt.strftime(JsonWebDataSource.OUTPUT_DATE_FORMAT).astype(str)
-            + " au "
-            + df["last_day_of_week"].dt.strftime(JsonWebDataSource.OUTPUT_DATE_FORMAT).astype(str)
+        return FrequencyConverter._aggregate(
+            daily, Frequency.WEEKLY, lambda day: day - timedelta(days=day.weekday()), minimum_days=7
         )
 
-        # Aggregate rows by month_year.
-        df = (
-            df[
-                [
-                    "first_day_of_week",
-                    "time_period",
-                    "start_index_m3",
-                    "end_index_m3",
-                    "volume_m3",
-                    "energy_kwh",
-                    "timestamp",
-                ]
-            ]
-            .groupby("time_period")
-            .agg(
-                first_day_of_week=("first_day_of_week", "min"),
-                start_index_m3=("start_index_m3", "min"),
-                end_index_m3=("end_index_m3", "max"),
-                volume_m3=("volume_m3", "sum"),
-                energy_kwh=("energy_kwh", "sum"),
-                timestamp=("timestamp", "min"),
-                count=("energy_kwh", "count"),
+    # ------------------------------------------------------
+    @staticmethod
+    def compute_monthly(daily: Sequence[PeriodReading]) -> list[PeriodReading]:
+
+        return FrequencyConverter._aggregate(daily, Frequency.MONTHLY, lambda day: day.replace(day=1), minimum_days=28)
+
+    # ------------------------------------------------------
+    @staticmethod
+    def compute_yearly(daily: Sequence[PeriodReading]) -> list[PeriodReading]:
+
+        return FrequencyConverter._aggregate(
+            daily, Frequency.YEARLY, lambda day: day.replace(month=1, day=1), minimum_days=360
+        )
+
+    # ------------------------------------------------------
+    @staticmethod
+    def _aggregate(
+        daily: Sequence[PeriodReading],
+        frequency: Frequency,
+        bucket_start: Callable[[date], date],
+        minimum_days: int,
+    ) -> list[PeriodReading]:
+        """Groups the days into the periods of a frequency, whole periods from the calendar.
+
+        A period is kept when it has at least minimum_days days with consumption. The last period is always kept, even
+        when it is partial.
+        """
+
+        buckets: dict[date, list[PeriodReading]] = {}
+        for day in daily:
+            buckets.setdefault(bucket_start(day.start_date), []).append(day)
+
+        starts = sorted(buckets)
+        res: list[PeriodReading] = []
+        for index, start in enumerate(starts):
+            rows = buckets[start]
+            days_with_consumption = sum(1 for row in rows if row.energy_kwh is not None)
+            if days_with_consumption < minimum_days and index != len(starts) - 1:
+                continue
+
+            res.append(
+                PeriodReading(
+                    start_date=start,
+                    end_date=FrequencyConverter._period_end(frequency, start),
+                    frequency=frequency,
+                    start_index_m3=min((r.start_index_m3 for r in rows if r.start_index_m3 is not None), default=None),
+                    end_index_m3=max((r.end_index_m3 for r in rows if r.end_index_m3 is not None), default=None),
+                    volume_m3=sum((r.volume_m3 for r in rows if r.volume_m3 is not None), 0),
+                    energy_kwh=sum((r.energy_kwh for r in rows if r.energy_kwh is not None), 0),
+                    timestamp=min(r.timestamp for r in rows),
+                )
             )
-            .reset_index()
-        )
-
-        # Sort rows by month ascending.
-        df = df.sort_values(by=["first_day_of_week"])
-
-        # Select rows where we have a full week (7 days) except for the current week.
-        df = pd.concat([df[(df["count"] >= 7)], df.tail(1)[df.tail(1)["count"] < 7]])
-
-        # Select target columns.
-        df = df[["time_period", "start_index_m3", "end_index_m3", "volume_m3", "energy_kwh", "timestamp"]]
-
-        res = cast(list[dict[str, Any]], df.to_dict("records"))
 
         return res
 
     # ------------------------------------------------------
     @staticmethod
-    def computeMonthly(daily: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _period_end(frequency: Frequency, start: date) -> date:
+        """Returns the day after the last day of a period that starts on start."""
 
-        df = pd.DataFrame(daily)
+        if frequency == Frequency.WEEKLY:
+            return start + timedelta(days=7)
+        if frequency == Frequency.MONTHLY:
+            return next_month_start(start)
 
-        # Trimming head and trailing spaces and convert to datetime.
-        df["date_time"] = pd.to_datetime(df["time_period"].str.strip(), format=JsonWebDataSource.OUTPUT_DATE_FORMAT)
-
-        # Get the corresponding month-year.
-        df["month_year"] = (
-            df["date_time"].apply(lambda x: FrequencyConverter.MONTHS[x.month - 1]).astype(str)
-            + " "
-            + df["date_time"].dt.strftime("%Y").astype(str)
-        )
-
-        # Aggregate rows by month_year.
-        df = (
-            df[["date_time", "month_year", "start_index_m3", "end_index_m3", "volume_m3", "energy_kwh", "timestamp"]]
-            .groupby("month_year")
-            .agg(
-                first_day_of_month=("date_time", "min"),
-                start_index_m3=("start_index_m3", "min"),
-                end_index_m3=("end_index_m3", "max"),
-                volume_m3=("volume_m3", "sum"),
-                energy_kwh=("energy_kwh", "sum"),
-                timestamp=("timestamp", "min"),
-                count=("energy_kwh", "count"),
-            )
-            .reset_index()
-        )
-
-        # Sort rows by month ascending.
-        df = df.sort_values(by=["first_day_of_month"])
-
-        # Select rows where we have a full month (more than 27 days) except for the current month.
-        df = pd.concat([df[(df["count"] >= 28)], df.tail(1)[df.tail(1)["count"] < 28]])
-
-        # Rename columns for their target names.
-        df = df.rename(columns={"month_year": "time_period"})
-
-        # Select target columns.
-        df = df[["time_period", "start_index_m3", "end_index_m3", "volume_m3", "energy_kwh", "timestamp"]]
-
-        res = cast(list[dict[str, Any]], df.to_dict("records"))
-
-        return res
-
-    # ------------------------------------------------------
-    @staticmethod
-    def computeYearly(daily: list[dict[str, Any]]) -> list[dict[str, Any]]:
-
-        df = pd.DataFrame(daily)
-
-        # Trimming head and trailing spaces and convert to datetime.
-        df["date_time"] = pd.to_datetime(df["time_period"].str.strip(), format=JsonWebDataSource.OUTPUT_DATE_FORMAT)
-
-        # Get the corresponding year.
-        df["year"] = df["date_time"].dt.strftime("%Y")
-
-        # Aggregate rows by month_year.
-        df = (
-            df[["year", "start_index_m3", "end_index_m3", "volume_m3", "energy_kwh", "timestamp"]]
-            .groupby("year")
-            .agg(
-                start_index_m3=("start_index_m3", "min"),
-                end_index_m3=("end_index_m3", "max"),
-                volume_m3=("volume_m3", "sum"),
-                energy_kwh=("energy_kwh", "sum"),
-                timestamp=("timestamp", "min"),
-                count=("energy_kwh", "count"),
-            )
-            .reset_index()
-        )
-
-        # Sort rows by month ascending.
-        df = df.sort_values(by=["year"])
-
-        # Select rows where we have almost a full year (more than 360) except for the current year.
-        df = pd.concat([df[(df["count"] >= 360)], df.tail(1)[df.tail(1)["count"] < 360]])
-
-        # Rename columns for their target names.
-        df = df.rename(columns={"year": "time_period"})
-
-        # Select target columns.
-        df = df[["time_period", "start_index_m3", "end_index_m3", "volume_m3", "energy_kwh", "timestamp"]]
-
-        res = cast(list[dict[str, Any]], df.to_dict("records"))
-
-        return res
+        return date(start.year + 1, 1, 1)
